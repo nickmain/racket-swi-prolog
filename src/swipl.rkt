@@ -12,18 +12,21 @@
     (cvector-ref chars 0)))
 
 ;;-define a functor
+(define (functor name arity) 
+  (PL_new_functor (PL_new_atom (symbol->string name)) arity))
 (define-syntax-rule [define-functor defnName name arity]
-  (define defnName (PL_new_functor (PL_new_atom name) arity)))
+  (define defnName (functor name arity)))
 
 ;;-define a predicate
-(define (predicate name arity) (PL_predicate name arity #f))
+(define (predicate name arity) 
+  (PL_predicate (symbol->string name) arity #f))
 (define-syntax-rule [define-predicate defnName name arity]
   (define defnName (predicate name arity)))
 
 ;;--common predicates
-(define-predicate pred-consult "consult" 1)
-(define-predicate pred-make    "make" 0)
-(define-predicate pred-term->atom "term_to_atom" 2)
+(define-predicate pred-consult    'consult      1)
+(define-predicate pred-make       'make         0)
+(define-predicate pred-term->atom 'term_to_atom 2)
 
 ; queries
 
@@ -33,7 +36,7 @@
 
 ;;--access the nth term ref (zero based index)
 (define (term-ref-at terms index)
-  (if (= index 0) terms (ptr-add terms 1)))
+  (if (= index 0) terms (ptr-add terms index)))
    
 ;; call a predicate with a set of terms - return the terms or false
 (define (call-pred-with pred terms)
@@ -41,28 +44,13 @@
       terms
       #f))
 
-;; call a predicate with symbols, strings and numbers - return the term refs or false
+;; call a predicate with scheme object args - return the term refs or false
 (define (call-predicate pred . args)
-  (let* ([arity  (length args)]
-         [terms  (if (> arity 0) (term-refs arity) #f)])
-    ;-fill in the term slots
-    (if (> arity 0 )
-        (do 
-            ((i 0 (+ i 1)))
-          ((>= i arity))
-          
-          (let ([arg  (list-ref args i)]
-                [term (term-ref-at terms i)])
-            (cond
-              ((string? arg) (PL_put_atom_chars term arg))
-              ((symbol? arg) (PL_put_atom_chars term (symbol->string arg)))
-              ((number? arg) (PL_put_float term arg)))))
-        #f)
-    (call-pred-with pred terms)))
+  (call-pred-with pred (objs->terms args)))
 
 ;;--common predicate calls
 (define (consult path)
-  (in-foreign-frame (call-predicate pred-consult path)))
+  (in-foreign-frame (call-predicate pred-consult (string->symbol path))))
 
 (define (make)
   (in-foreign-frame (call-predicate pred-make)))
@@ -96,7 +84,12 @@
                         (PL_cons_list term
                                       (obj->term (car obj))
                                       (obj->term (cdr obj)))))
-    ((vector?  obj) (#f))
+    
+    ((vector?  obj) (let* ([arity  (- (vector-length obj) 1)]
+                           [args   (objs->terms (cdr (vector->list obj)))]
+                           [functr (functor (vector-ref obj 0) arity)])
+                      (PL_cons_functor_v term functr args)))
+    
     ((cpointer? obj) (PL_put_term term obj)))
   
   term)
@@ -105,6 +98,23 @@
 (define (obj->term obj)
   (set-term! (PL_new_term_ref) obj))
   
+;;--make term refs from a list of objects
+(define (objs->terms objs)
+  (let* ([arity  (length objs)]
+         [terms  (if (> arity 0) (term-refs arity) #f)])
+    ;-fill in the term slots
+    (if (> arity 0 )
+        (do 
+            ((i 0 (+ i 1)))
+          ((>= i arity))
+          
+          (set-term! 
+            (term-ref-at terms i) 
+            (list-ref objs i)))
+        #f)
+    
+    terms))
+
 ;;--convert a term to an atom and return the term-ref
 (define (term->atom term)
   (let ([terms (term-refs 2)])

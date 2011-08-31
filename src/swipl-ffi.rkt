@@ -45,7 +45,7 @@
   _int        PL_chars_to_term       ( _string term_t )
   _void       PL_put_term            ( term_t term_t )
   _void       PL_put_nil             ( term_t )
-  _int        PL_cons_functor        ( term_t functor_t term_t term_t )
+  _int        PL_cons_functor_v      ( term_t functor_t term_t )
   _int        PL_cons_list           ( term_t term_t term_t )
   _int        PL_register_foreign    ( _string _int (_fun -> foreign_t) _int ))
 
