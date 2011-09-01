@@ -5,12 +5,6 @@
 
 (provide (all-defined-out)) ;TODO - refine the exports
 
-;;--get a string from an atom in a term
-(define (atom->string term)
-  (let ([chars (make-cvector _string 1)])
-    (PL_get_atom_chars term (cvector-ptr chars))
-    (cvector-ref chars 0)))
-
 ;;-define a functor
 (define (functor name arity) 
   (PL_new_functor (PL_new_atom (symbol->string name)) arity))
@@ -67,9 +61,13 @@
 ;; string   -> parsed as a term
 ;; number   -> number
 ;; vector   -> compound term  #(foo a b) -> foo(a,b)
+;; pair     -> list (may be improper)
 ;; list     -> list
-;; boolean  -> variable
+;; boolean  -> new variable
 ;; cpointer -> term_t
+;; box      -> variable, the same box yields the same variable and
+;;             the box value is set to that common term (previous val is 
+;;             overwritten)
 ;; 
 (define (set-term! term obj)
   (cond
@@ -79,19 +77,24 @@
     ((number?  obj) (PL_put_float      term obj))
     ((boolean? obj) (PL_put_variable   term))
     
-    ((list?    obj) (if (null? obj)
-                        (PL_put_nil term)
-                        (PL_cons_list term
-                                      (obj->term (car obj))
-                                      (obj->term (cdr obj)))))
-    
+    ((null?    obj) (PL_put_nil term))
+    ((pair?    obj) (PL_cons_list term
+                                  (obj->term (car obj))
+                                  (obj->term (cdr obj))))
+  
     ((vector?  obj) (let* ([arity  (- (vector-length obj) 1)]
                            [args   (objs->terms (cdr (vector->list obj)))]
                            [functr (functor (vector-ref obj 0) arity)])
                       (PL_cons_functor_v term functr args)))
     
-    ((cpointer? obj) (PL_put_term term obj)))
-  
+    ((cpointer? obj) (PL_put_term term obj))
+    
+    ((box? obj) (let ([val (unbox obj)])
+                  (if (and (cpointer? val) val) ;not #f since that is cpointer
+                      (PL_put_term term val)
+                      (begin
+                        (PL_put_variable term)                       
+                        (set-box! obj term))))))
   term)
 
 ;;--create a new term-ref and set it to the given object
@@ -115,9 +118,103 @@
     
     terms))
 
+;;--parse a string to a term - return false if syntax error, with 
+;;  the error in the term
+(define (parse-term term-string term)
+  (if (= 0 (PL_chars_to_term  term-string term))
+      #f
+      #t))
+
 ;;--convert a term to an atom and return the term-ref
 (define (term->atom term)
   (let ([terms (term-refs 2)])
     (set-term! terms term)
     (call-pred-with pred-term->atom terms)
     (term-ref-at terms 1)))
+
+;;--convert a term to a string
+(define (term->string term)
+  (let ([chars (make-cvector _string 1)])
+    (PL_get_chars term 
+                  (cvector-ptr chars)
+                  (+ CVT_ATOM CVT_INTEGER CVT_FLOAT CVT_VARIABLE CVT_WRITE))
+    (cvector-ref chars 0)))
+
+;;--convert a char-code list to a string
+(define (charlist-term->string term)
+  (let ([chars (make-cvector _string 1)])
+    (PL_get_chars term (cvector-ptr chars) CVT_LIST)
+    (cvector-ref chars 0)))
+
+;;--construct a Scheme object from a Prolog term - return the object
+;;
+;; atom     -> symbol
+;; string   -> list of char codes - for normal strings
+;; string   -> string - only for things such as syntax error strings
+;; number   -> number
+;; compound -> vector
+;; list     -> list or improper list (if tail is not empty list)
+;; variable -> mutable box containing var name symbol
+;;
+(define (term->obj term)
+  (let ([type (PL_term_type term)])
+    (cond 
+      ((= type PL_VARIABLE) 
+       (box (term->string term)))
+      
+      ((= type PL_STRING)
+       (let ([int   (make-cvector _int 1)]
+             [chars (make-cvector _string 1)])
+         (PL_get_string term
+                        (cvector-ptr chars)
+                        (cvector-ptr int))
+         (cvector-ref chars 0)))
+      
+      ((= type PL_ATOM)
+       (let ([s (term->string term)])
+         (if (string=? s "[]")  ; empty list ?
+             null
+             (string->symbol (term->string term)))))
+      
+      ((= type PL_INTEGER)  
+       (let ([long (make-cvector _long 1)])
+         (PL_get_long term (cvector-ptr long))
+         (cvector-ref long 0)))
+      
+      ((= type PL_FLOAT)    
+       (let ([double (make-cvector _double 1)])
+         (PL_get_float term (cvector-ptr double))
+         (cvector-ref double 0)))
+      
+      ((= type PL_TERM)
+       (let ([atom-vec  (make-cvector atom_t 1)]
+             [arity-vec (make-cvector _int 1)]
+             [atom-term (term-refs 1)])
+         (PL_get_name_arity term 
+                            (cvector-ptr atom-vec) 
+                            (cvector-ptr arity-vec))
+         (PL_put_atom atom-term (cvector-ref atom-vec 0))
+         (let ([functr   (term->obj atom-term)]
+               [arity    (cvector-ref arity-vec 0)])
+           
+           (if (eqv? functr '|.|)
+               
+               ; recursive build of list or improper list
+               (let ([arg-term1 (term-refs 1)]
+                     [arg-term2 (term-refs 1)])
+                 (PL_get_arg 1 term arg-term1)
+                 (PL_get_arg 2 term arg-term2)
+                 (cons (term->obj arg-term1)
+                       (term->obj arg-term2)))
+           
+               ; else build vector for compound term
+               (let ([arg-term (term-refs 1)]
+                     [res-vec  (make-vector (+ arity 1))])
+                 (vector-set! res-vec 0 functr)  ; functor at start of vector
+                 (do ((i 1 (+ i 1))) ; loop over the args and insert into vector
+                   ((> i arity))
+                   (PL_get_arg i term arg-term)
+                   (vector-set! res-vec i (term->obj arg-term)))
+                 res-vec )))))
+      
+      (else #f))))
