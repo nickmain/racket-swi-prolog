@@ -19,6 +19,7 @@
 
 ;;--common predicates
 (define-predicate pred-consult    'consult      1)
+(define-predicate pred-call       'call         1)
 (define-predicate pred-make       'make         0)
 (define-predicate pred-term->atom 'term_to_atom 2)
 
@@ -58,6 +59,7 @@
 ;;--construct a Prolog term from a Scheme object - return the term ref
 ;;
 ;; symbol   -> atom
+;; char     -> integer code point
 ;; string   -> parsed as a term
 ;; number   -> number
 ;; vector   -> compound term  #(foo a b) -> foo(a,b)
@@ -65,13 +67,15 @@
 ;; list     -> list
 ;; boolean  -> new variable
 ;; cpointer -> term_t
-;; box      -> variable, the same box yields the same variable and
+;; (box #f) -> variable, the same box yields the same variable and
 ;;             the box value is set to that common term (previous val is 
 ;;             overwritten)
+;; (box ?)  -> recursive call to set contents 
 ;; 
 (define (set-term! term obj)
   (cond
     ((symbol?  obj) (PL_put_atom_chars term (symbol->string obj)))
+    ((char?    obj) (PL_put_integer    term (char->integer obj)))
     ((string?  obj) (PL_chars_to_term  obj  term))
     ((integer? obj) (PL_put_integer    term obj))
     ((number?  obj) (PL_put_float      term obj))
@@ -125,6 +129,16 @@
       #f
       #t))
 
+;;--build a comma term tree from a list of objects
+(define (obj-list->comma-term objs)
+  (cond
+    ((null? objs) (obj->term null))
+    ((= (length objs) 1) (obj->term (car objs)))
+    (else (obj->term 
+           (vector '|,| 
+                   (obj->term (car objs))
+                   (obj-list->comma-term (cdr objs)))))))
+    
 ;;--convert a term to an atom and return the term-ref
 (define (term->atom term)
   (let ([terms (term-refs 2)])
@@ -160,7 +174,7 @@
   (let ([type (PL_term_type term)])
     (cond 
       ((= type PL_VARIABLE) 
-       (box (term->string term)))
+       (box (string->symbol (term->string term))))
       
       ((= type PL_STRING)
        (let ([int   (make-cvector _int 1)]
@@ -218,3 +232,44 @@
                  res-vec )))))
       
       (else #f))))
+
+;;--load a theory with the given name-symbol (reloading that name will overwrite)
+(define (load-theory name-symbol source-string)
+  (let* ([stream (box #f)]
+         [codes  (string->list source-string)]
+         [query  (obj-list->comma-term 
+                  (list (vector 'open_chars_stream codes stream)
+                        (vector 'load_files name-symbol 
+                                (list (vector 'stream stream)))))])
+    (call-pred-with pred-call query)))
+ 
+;;--macro for performing a query and executing a set of forms for
+;;  each solution.
+;;
+;; (with-query [vars ...] query body ...)
+;;
+;; vars are symbols that may also appear in the query form - where they are
+;; defined as boxes. The vars may also be referenced in the body where
+;; they will be the unboxed result objects for each solution.
+;;
+(define-syntax with-query
+  (λ (syn)
+    (syntax-case syn ()
+      ((_ [vars ...] query body ...)
+       (let* ([var-names (syntax->datum #'(vars ...))]
+              [vars-list (map (λ(v) (let ([vs (datum->syntax syn v)]) `[,vs (box #f)])) var-names)]
+              [unbox-list (map (λ(v) (let ([vs (datum->syntax syn v)]) `[,vs (term->obj (unbox ,vs))])) var-names)])
+         (with-syntax ((vars-list vars-list)
+                       (unbox-list unbox-list))
+           
+         #'(let vars-list 
+             (let* ([term    (obj->term query)]
+                    [qhandle (PL_open_query #f PL_Q_NORMAL pred-call term)])
+               (let loop ([result (PL_next_solution qhandle)])
+                 (if (not (= result 0))
+                     (let unbox-list
+                       (begin body ...)
+                       (loop (PL_next_solution qhandle)))
+                     (PL_close_query qhandle)))))
+         
+           ))))))
