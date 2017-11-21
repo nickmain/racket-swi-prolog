@@ -19,7 +19,7 @@
 (define foreign_t   _pointer) ;;return from foreign preds
 
 (native-lib 
-  "/opt/local/lib/swipl-5.10.4/lib/i386-darwin10.7.0/libswipl"
+  "/usr/local/Cellar/swi-prolog/7.6.1/libexec/lib/swipl-7.6.1/lib/x86_64-darwin17.0.0/libswipl"
   
   _int        PL_initialise          ( _int _pointer )
   _int        PL_halt                ( _int )
